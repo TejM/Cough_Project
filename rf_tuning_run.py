@@ -1,16 +1,72 @@
-import numpy as np
 import dask.dataframe as dd
 from dask.diagnostics import ProgressBar
-from joblib import dump
-import pandas as pd
-from local_utils import FEATURE_DIR, get_cv_iterator, load_data_nozeros_bypoint
-from sklearn.metrics import accuracy_score, precision_score, recall_score, \
-    f1_score, matthews_corrcoef, make_scorer
-from sklearn.model_selection import train_test_split, cross_validate
-from sklearn.ensemble import RandomForestClassifier
 from dask_ml.model_selection import RandomizedSearchCV, GridSearchCV
+import sklearn
+from sklearn.ensemble import RandomForestClassifier
+import os
+from local_utils import FEATURE_DIR, RESULTS_DIR, get_cv_iterator, load_data_nozeros_bypoint
+from joblib import dump
+import numpy as np
+import gouda
 
-def random_forest_grid():
+
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+
+def get_configurations(results):
+    num_configs = len(results['params'])
+    means = []
+    configs = []
+    num_folds = 0
+    for x in results.keys():
+        if 'test_score' in x and x.startswith('split'):
+            num_folds += 1
+    print('Num_folds', num_folds)
+
+    for x in range(num_configs):
+        m = [results['split%d_test_score' % fold][x] for fold in range(num_folds)]
+        print(m)
+        means.append(np.mean(m))
+        configs.append(results['params'][x])
+    return configs, means
+
+
+# def main_old():
+#     y = dd.read_hdf(os.path.join(FEATURE_DIR, 'annotations.hdf5'), 'key')
+#     y = y['coverage'] > 0.9
+#     x = dd.read_hdf(os.path.join(FEATURE_DIR, 'features.hdf5'), 'key')
+#     cols = list(x.columns)
+#     cols.remove('fileid')
+#     x = x[cols]
+#
+#     with ProgressBar():
+#         x = x.compute().values
+#         y = y.compute().values
+#
+#     params = {
+#         'penalty': ['l1', 'l2'],
+#         'C': [0.01, .1, 1, 10, 100, 200],
+#         'class_weight': [None],  # 'balanced'],
+#         'fit_intercept': [True, False]
+#     }
+#     lr = LogisticRegression()
+#     with ProgressBar():
+#         grid_search = RandomizedSearchCV(lr,
+#                                          params,
+#                                          n_jobs=-1,
+#                                          cv=get_cv_iterator(),
+#                                          refit=True,
+#                                          iid=True,
+#                                          cache_cv=True)
+#         grid_search.fit(x, y)
+#     configs, means = get_configurations(grid_search.cv_results_)
+#     best_model = grid_search.best_estimator_
+#     output_path = 'hypersearch_test_3.pickle'
+#     dump(['test', grid_search.cv_results_, best_model], output_path)
+
+
+def main():
     print("Loading data...", end='\r')
     x, y, iterator = load_data_nozeros_bypoint()
     print("Loaded                      ")
@@ -27,58 +83,36 @@ def random_forest_grid():
     # Method of selecting samples for training each tree
     bootstrap = [True, False]
     # Create the random grid
-    random_grid = {'n_estimators': n_estimators,
+    params = {'n_estimators': n_estimators,
                    'max_features': max_features,
                    'max_depth': max_depth,
                    'min_samples_split': min_samples_split,
                    'min_samples_leaf': min_samples_leaf,
                    'bootstrap': bootstrap}
+    scoring = {'accuracy': 'accuracy', 'precision': 'precision', 'recall': 'recall', 'f1': 'f1',
+               'mcc': sklearn.metrics.make_scorer(sklearn.metrics.matthews_corrcoef)}
 
-    scoring = {'accuracy': make_scorer(accuracy_score),
-               'prec': make_scorer(precision_score),
-               'f1': make_scorer(f1_score),
-               'mcc': make_scorer(matthews_corrcoef),
-               'rec': make_scorer(recall_score)}
-
+    out_dir = gouda.ensure_dir(os.path.join(RESULTS_DIR, 'log_results'))
+    print(out_dir)
     rf = RandomForestClassifier()
     with ProgressBar():
-        grid_search = RandomizedSearchCV(estimator = rf, scoring=scoring, param_distributions=random_grid, refit=False, cv=iterator, n_iter=100, random_state=42, n_jobs = -1)
+        grid_search = RandomizedSearchCV(rf,
+                                         params,
+                                         scoring=scoring,
+                                         n_jobs=-1,
+                                         cv=iterator,
+                                         refit='mcc',
+                                         iid=True,
+                                         cache_cv=True)
         grid_search.fit(x, y)
+    configs, means = get_configurations(grid_search.cv_results_)
+    output_path = os.path.join(out_dir, 'new_RF.pickle')
+    dump(['test', 'grid_search.cv_results_', grid_search.cv_results_,
+          'grid_search.best_params_', grid_search.best_params_,
+          'grid_search.best_score_', grid_search.best_score_,
+          'grid_search.best_estimator_', grid_search.best_estimator_], output_path)
 
-    best_model = grid_search.best_estimator_
-    output_path = 'scoring_hypersearch_knn.pickle'
-    dump(['test', grid_search.cv_results_], output_path)
-    print(grid_search.cv_results_)
-    return (grid_search.cv_results_)
-    print(best_model)
+
 
 if __name__ == '__main__':
-    rf_grid_results=random_forest_grid()
-
-#write precision to file
-    f= open("rf_prec.txt","w+")
-    for i in rf_grid_results['split0_test_prec']:
-        f.write(str(i))
-    for i in rf_grid_results['split1_test_prec']:
-        f.write(str(i))
-    for i in rf_grid_results['split2_test_prec']:
-        f.write(str(i))
-    for i in rf_grid_results['split3_test_prec']:
-        f.write(str(i))
-    for i in rf_grid_results['split4_test_prec']:
-        f.write(str(i))
-
-#write f1 to file
-    f1= open("knn_f1.txt","w+")
-    for i in rf_grid_results['split0_test_f1']:
-        f1.write(str(i))
-    for i in rf_grid_results['split1_test_f1']:
-        f1.write(str(i))
-    for i in rf_grid_results['split2_test_f1']:
-        f1.write(str(i))
-    for i in rf_grid_results['split3_test_f1']:
-        f1.write(str(i))
-    for i in rf_grid_results['split4_test_f1']:
-        f1.write(str(i))
-
-
+    main()
